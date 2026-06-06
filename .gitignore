@@ -1,0 +1,29 @@
+.pio/
+.pioenvs/
+.piolibdeps/
+.cache/
+
+# Editor settings
+.vscode/
+
+# PlatformIO local settings
+platformio.ini.user
+
+# Generated firmware / build artifacts
+*.bin
+*.elf
+*.hex
+*.dfu
+*.zip
+
+# OS temporary files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backup and temp files
+*~
+*.bak
+*.tmp
+*.swp
+*.swo
