@@ -1,36 +1,64 @@
 #include "sensor.h"
 
 #include <Arduino.h>
-#include <HX711.h>
-#include <climits>
 
-static HX711 loadCell;
+static uint8_t trigPin = 0;
+static uint8_t echoPin = 0;
+static float nearThresholdCm = 0.0f;
+static bool initialized = false;
 
-void sensorInit(uint8_t doutPin, uint8_t sckPin, float calibration) {
-  loadCell.begin(doutPin, sckPin);
-  loadCell.set_scale(calibration);
+void sensorInit(uint8_t trig, uint8_t echo, float thresholdCm) {
+  trigPin = trig;
+  echoPin = echo;
+  nearThresholdCm = thresholdCm;
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  digitalWrite(trigPin, LOW);
+  initialized = true;
 }
 
 bool sensorIsReady() {
-  return loadCell.is_ready();
+  return initialized;
 }
 
-void sensorTare(uint8_t times) {
-  if (!loadCell.is_ready()) return;
-  loadCell.tare(times);
+static float readSingleDistanceCm() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  unsigned long duration = pulseIn(echoPin, HIGH, 30000UL);
+  if (duration == 0) {
+    return -1.0f;
+  }
+
+  float distanceCm = static_cast<float>(duration) / 58.0f;
+  if (distanceCm <= 0.0f || distanceCm > 400.0f) {
+    return -1.0f;
+  }
+  return distanceCm;
 }
 
-long sensorReadRaw(uint8_t times) {
-  if (!loadCell.is_ready()) return LONG_MIN;
-  return loadCell.read_average(times);
-}
+float sensorReadDistanceCm(uint8_t samples) {
+  if (!initialized) {
+    return -1.0f;
+  }
 
-double sensorReadValue(uint8_t times) {
-  if (!loadCell.is_ready()) return 0.0;
-  return loadCell.get_value(times);
-}
+  float sum = 0.0f;
+  uint8_t validCount = 0;
+  for (uint8_t i = 0; i < samples; ++i) {
+    float distance = readSingleDistanceCm();
+    if (distance > 0.0f) {
+      sum += distance;
+      ++validCount;
+    }
+    delay(25);
+  }
 
-float sensorReadUnits(uint8_t times) {
-  if (!loadCell.is_ready()) return 0.0f;
-  return loadCell.get_units(times);
+  if (validCount == 0) {
+    return -1.0f;
+  }
+
+  return sum / static_cast<float>(validCount);
 }

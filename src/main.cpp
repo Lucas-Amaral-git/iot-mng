@@ -8,7 +8,6 @@
 
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include <HX711.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
@@ -18,17 +17,17 @@
 #include "mqtt.h"
 
 namespace Config {
-constexpr unsigned long SENSOR_READ_INTERVAL_MS = 5000UL;
-constexpr unsigned long PROCESS_INTERVAL_MS = 600000UL;
+constexpr unsigned long SENSOR_READ_INTERVAL_MS = 2000UL;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000UL;
 constexpr unsigned long NTP_UPDATE_INTERVAL_MS = 60000UL;
-constexpr size_t WINDOW_SIZE = 60;
+constexpr unsigned long MIN_EVENT_INTERVAL_MS = 30000UL;
 constexpr int TIMEZONE_OFFSET_SECONDS = -3 * 3600;
 constexpr bool TEST_MODE_EVERY_SECOND = true;
 constexpr bool SERIAL_ONLY_TEST_MODE = false;
-constexpr uint8_t HX711_DOUT_PIN = 4;
-constexpr uint8_t HX711_SCK_PIN = 5;
-constexpr float HX711_CALIBRATION_FACTOR = -7050.0f;
+constexpr uint8_t HCSR04_TRIG_PIN = 12;
+constexpr uint8_t HCSR04_ECHO_PIN = 13;
+constexpr float HCSR04_NEAR_DISTANCE_CM = 10.0f;
+constexpr uint8_t HCSR04_SAMPLE_COUNT = 3;
 }
 
 WiFiUDP ntpUdp;
@@ -37,16 +36,9 @@ WiFiClient wifiClient;
 
 DeviceConfig deviceCfg;
 bool haveDeviceConfig = false;
-
-float readings[Config::WINDOW_SIZE] = {0.0f};
-size_t readingsCount = 0;
-size_t readingsIndex = 0;
-bool hasLastValidWeight = false;
-float lastValidWeight = 0.0f;
-long lastValidRaw = 0;
-
+bool lastNearState = false;
+unsigned long lastEventMs = 0;
 unsigned long lastSensorReadMs = 0;
-unsigned long lastProcessingMs = 0;
 unsigned long lastWifiAttemptMs = 0;
 unsigned long lastNtpUpdateMs = 0;
 
@@ -54,17 +46,10 @@ void connectWiFi();
 void ensureWiFiConnected();
 void processSerialCommand(String line);
 void processIncomingCommand(const String &payload);
-void handleCalibrateCommand();
 void handleResetCommand();
-void handleScaleCommand(const String &payload);
-void readSensorSample();
-void storeReading(float value);
-float calculateMean(const float *values, size_t count);
-float calculateMedian(const float *values, size_t count);
+void readSensorDistance();
 bool buildTimestamp(char *buffer, size_t bufferSize);
-void publishProcessedData(float median, float mean);
-void publishTestReading(float weight);
-void processWindowIfReady();
+void publishFeedingEvent(float distanceCm);
 void printWiFiStatus();
 
 const char *DEFAULT_DEVICE_ID = "esp8266_pote_01";
@@ -77,14 +62,13 @@ void setup() {
   delay(500);
 
   Serial.println();
-  Serial.println("Iniciando monitoramento de racao com ESP8266 + HX711");
-  Serial.println("Comandos Serial: help | tare | calibrar <peso_gramas> | scale <peso_gramas> | provision");
+  Serial.println("Iniciando monitoramento de alimentacao com ESP8266 + HC-SR04");
+  Serial.println("Comandos Serial: help | provision | reset");
 
   if (Config::SERIAL_ONLY_TEST_MODE) {
-    sensorInit(Config::HX711_DOUT_PIN, Config::HX711_SCK_PIN, Config::HX711_CALIBRATION_FACTOR);
-    sensorTare();
+    sensorInit(Config::HCSR04_TRIG_PIN, Config::HCSR04_ECHO_PIN, Config::HCSR04_NEAR_DISTANCE_CM);
     lastSensorReadMs = millis();
-    Serial.println("[MODO TESTE] Apenas Serial ativo. Wi-Fi/MQTT/provisioning desativados. Leitura a cada 5 segundos.");
+    Serial.println("[MODO TESTE] Apenas Serial ativo. Leitura de distancia a cada 2 segundos.");
     return;
   }
 
@@ -95,8 +79,7 @@ void setup() {
     Serial.println("Para iniciar o AP de provisionamento digite 'provision' no Serial monitor ou pressione o botao de provisionamento.");
   }
 
-  sensorInit(Config::HX711_DOUT_PIN, Config::HX711_SCK_PIN, Config::HX711_CALIBRATION_FACTOR);
-  sensorTare();
+  sensorInit(Config::HCSR04_TRIG_PIN, Config::HCSR04_ECHO_PIN, Config::HCSR04_NEAR_DISTANCE_CM);
 
   WiFi.mode(WIFI_STA);
   connectWiFi();
@@ -107,11 +90,10 @@ void setup() {
   mqttInit(wifiClient, deviceCfg, [](const String &payload) { processIncomingCommand(payload); });
 
   lastSensorReadMs = millis();
-  lastProcessingMs = millis();
   lastNtpUpdateMs = millis();
 
   if (Config::TEST_MODE_EVERY_SECOND) {
-    Serial.println("[MODO TESTE] A cada 5 segundos o peso sera lido, impresso no Serial e enviado ao MQTT.");
+    Serial.println("[MODO TESTE] O sensor sera lido a cada 2 segundos e eventos de alimentacao serao publicados.");
   }
 }
 
@@ -126,7 +108,7 @@ void loop() {
   if (Config::SERIAL_ONLY_TEST_MODE) {
     if (millis() - lastSensorReadMs >= Config::SENSOR_READ_INTERVAL_MS) {
       lastSensorReadMs = millis();
-      readSensorSample();
+      readSensorDistance();
     }
     return;
   }
@@ -148,12 +130,7 @@ void loop() {
 
   if (millis() - lastSensorReadMs >= Config::SENSOR_READ_INTERVAL_MS) {
     lastSensorReadMs = millis();
-    readSensorSample();
-  }
-
-  if (!Config::TEST_MODE_EVERY_SECOND && millis() - lastProcessingMs >= Config::PROCESS_INTERVAL_MS) {
-    lastProcessingMs = millis();
-    processWindowIfReady();
+    readSensorDistance();
   }
 }
 
@@ -202,18 +179,9 @@ void processSerialCommand(String line) {
 
   if (line == "help" || line == "?") {
     Serial.println("Comandos disponiveis:");
-    Serial.println("  help                 - mostra esta ajuda");
-    Serial.println("  tare                 - zera a balanca");
-    Serial.println("  calibrar <peso>      - calcula fator com peso conhecido");
-    Serial.println("  scale <peso>         - alias de calibrar <peso>");
-    Serial.println("  provision            - inicia o AP de provisionamento");
-    return;
-  }
-
-  if (line == "tare") {
-    Serial.println("Comando Serial recebido: tare");
-    sensorTare();
-    Serial.println("Tara executada");
+    Serial.println("  help      - mostra esta ajuda");
+    Serial.println("  provision - inicia o AP de provisionamento");
+    Serial.println("  reset     - reinicia o dispositivo");
     return;
   }
 
@@ -227,85 +195,37 @@ void processSerialCommand(String line) {
     return;
   }
 
-  if (line.startsWith("calibrar ") || line.startsWith("scale ")) {
-    handleScaleCommand(line);
+  if (line == "reset") {
+    handleResetCommand();
     return;
   }
 
   Serial.printf("Comando desconhecido: %s\n", line.c_str());
 }
 
-void readSensorSample() {
-  int doutState = digitalRead(Config::HX711_DOUT_PIN);
-  const char *signalState = (doutState == LOW) ? "BAIXO" : "ALTO";
-
+void readSensorDistance() {
   if (!sensorIsReady()) {
-    if (hasLastValidWeight) {
-      Serial.printf("%s HX711 sem dado pronto | DOUT=%s (%d) | ultimo peso valido=%.2f | ultimo bruto=%ld\n",
-                    Config::TEST_MODE_EVERY_SECOND ? "[MODO TESTE]" : "",
-                    signalState,
-                    doutState,
-                    lastValidWeight,
-                    lastValidRaw);
+    Serial.println("Sensor HC-SR04 nao inicializado");
+    return;
+  }
+
+  float distance = sensorReadDistanceCm(Config::HCSR04_SAMPLE_COUNT);
+  bool near = (distance > 0.0f && distance <= Config::HCSR04_NEAR_DISTANCE_CM);
+
+  if (Config::TEST_MODE_EVERY_SECOND) {
+    if (distance < 0.0f) {
+      Serial.println("[MODO TESTE] Distancia invalida ou sem eco");
     } else {
-      Serial.printf("%s HX711 sem dado pronto | DOUT=%s (%d) | ainda sem leitura valida\n",
-                    Config::TEST_MODE_EVERY_SECOND ? "[MODO TESTE]" : "",
-                    signalState,
-                    doutState);
-    }
-    return;
-  }
-
-  long raw = sensorReadRaw(1);
-  float weight = sensorReadUnits(1);
-  if (raw != LONG_MIN) {
-    lastValidRaw = raw;
-  }
-  lastValidWeight = weight;
-  hasLastValidWeight = true;
-  storeReading(weight);
-
-  if (!Config::TEST_MODE_EVERY_SECOND) {
-    return;
-  }
-
-  Serial.printf("[MODO TESTE] HX711 pronto | DOUT=%s (%d) | bruto=%ld | peso=%.2f\n",
-                signalState,
-                doutState,
-                lastValidRaw,
-                weight);
-  publishTestReading(weight);
-}
-
-void storeReading(float value) {
-  readings[readingsIndex] = value;
-  readingsIndex = (readingsIndex + 1) % Config::WINDOW_SIZE;
-
-  if (readingsCount < Config::WINDOW_SIZE) {
-    ++readingsCount;
-  }
-}
-
-float calculateMean(const float *values, size_t count) {
-  if (count == 0) return 0.0f;
-  float sum = 0.0f;
-  for (size_t i = 0; i < count; ++i) sum += values[i];
-  return sum / static_cast<float>(count);
-}
-
-float calculateMedian(const float *values, size_t count) {
-  if (count == 0) return 0.0f;
-  float sorted[Config::WINDOW_SIZE];
-  for (size_t i = 0; i < count; ++i) sorted[i] = values[i];
-  for (size_t i = 0; i < count - 1; ++i) {
-    for (size_t j = i + 1; j < count; ++j) {
-      if (sorted[j] < sorted[i]) {
-        float t = sorted[i]; sorted[i] = sorted[j]; sorted[j] = t;
-      }
+      Serial.printf("[MODO TESTE] Distancia=%.2f cm | estado=%s\n", distance, near ? "PERTO" : "LONGE");
     }
   }
-  if (count % 2 == 0) return (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0f;
-  return sorted[count / 2];
+
+  if (near && !lastNearState && millis() - lastEventMs >= Config::MIN_EVENT_INTERVAL_MS) {
+    lastEventMs = millis();
+    publishFeedingEvent(distance);
+  }
+
+  lastNearState = near;
 }
 
 bool buildTimestamp(char *buffer, size_t bufferSize) {
@@ -320,16 +240,14 @@ bool buildTimestamp(char *buffer, size_t bufferSize) {
   return true;
 }
 
-void publishTestReading(float weight) {
-  char timestamp[32] = {0};
-  if (!buildTimestamp(timestamp, sizeof(timestamp))) strcpy(timestamp, "sem_timestamp");
-
-  Serial.printf("[MODO TESTE] peso=%.2f | timestamp=%s\n", weight, timestamp);
-
+void publishFeedingEvent(float distanceCm) {
   if (!mqttConnected()) {
-    Serial.println("[MODO TESTE] MQTT desconectado, leitura nao enviada");
+    Serial.println("MQTT desconectado, evento nao enviado");
     return;
   }
+
+  char timestamp[32] = {0};
+  if (!buildTimestamp(timestamp, sizeof(timestamp))) strcpy(timestamp, "sem_timestamp");
 
   JsonDocument doc;
   const char *deviceId = DEFAULT_DEVICE_ID;
@@ -341,10 +259,10 @@ void publishTestReading(float weight) {
 
   doc["device_id"] = deviceId;
   doc["token"] = token;
-  doc["peso"] = weight;
-  doc["peso_media"] = weight;
   doc["timestamp"] = timestamp;
-  doc["action"] = "teste_leitura_por_segundo";
+  doc["distance_cm"] = distanceCm;
+  doc["action"] = "alimentacao";
+  doc["event"] = "alimentou";
 
   char payload[384];
   size_t payloadSize = serializeJson(doc, payload, sizeof(payload));
@@ -355,68 +273,10 @@ void publishTestReading(float weight) {
 
   bool sent = mqttPublishPayload(payload, payloadSize);
   if (sent) {
-    Serial.printf("[MODO TESTE] Leitura a cada 1s -> peso=%.2f | timestamp=%s | payload=%s\n", weight, timestamp, payload);
+    Serial.printf("Evento publicado: %s\n", payload);
   } else {
-    Serial.printf("[MODO TESTE] Falha ao publicar leitura: peso=%.2f\n", weight);
+    Serial.println("Falha ao publicar evento MQTT");
   }
-}
-
-void publishProcessedData(float median, float mean) {
-  if (!mqttConnected()) {
-    Serial.println("MQTT desconectado, envio adiado");
-    return;
-  }
-
-  char timestamp[32] = {0};
-  if (!buildTimestamp(timestamp, sizeof(timestamp))) strcpy(timestamp, "sem_timestamp");
-
-  JsonDocument doc;
-  const char *deviceId = DEFAULT_DEVICE_ID;
-  const char *token = DEFAULT_TOKEN;
-  if (haveDeviceConfig) {
-    if (deviceCfg.device_id.length() > 0) deviceId = deviceCfg.device_id.c_str();
-    if (deviceCfg.token.length() > 0) token = deviceCfg.token.c_str();
-  }
-
-  doc["device_id"] = deviceId;
-  doc["token"] = token;
-  doc["peso"] = median;
-  doc["peso_media"] = mean;
-  doc["timestamp"] = timestamp;
-  doc["action"] = "estabilidade";
-
-  char payload[384];
-  size_t payloadSize = serializeJson(doc, payload, sizeof(payload));
-  if (payloadSize == 0) {
-    Serial.println("Falha ao serializar JSON");
-    return;
-  }
-
-  bool sent = mqttPublishPayload(payload, payloadSize);
-  if (sent) Serial.printf("Payload MQTT enviado: %s\n", payload);
-  else Serial.println("Falha ao publicar payload MQTT");
-}
-
-void processWindowIfReady() {
-  if (readingsCount == 0) {
-    Serial.println("Janela de leitura ainda vazia");
-    return;
-  }
-
-  float values[Config::WINDOW_SIZE];
-  for (size_t i = 0; i < readingsCount; ++i) {
-    size_t idx = (readingsIndex + Config::WINDOW_SIZE - readingsCount + i) % Config::WINDOW_SIZE;
-    values[i] = readings[idx];
-  }
-
-  float mean = calculateMean(values, readingsCount);
-  float median = calculateMedian(values, readingsCount);
-  Serial.println("==============================");
-  Serial.printf("[MODO PRODUCAO] Processamento da janela (%u leituras)\n", (unsigned)readingsCount);
-  Serial.printf("Media: %.2f\n", mean);
-  Serial.printf("Mediana: %.2f\n", median);
-  Serial.println("==============================");
-  publishProcessedData(median, mean);
 }
 
 void printWiFiStatus() {
@@ -438,7 +298,7 @@ void processIncomingCommand(const String &payload) {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, command);
     if (error) {
-      Serial.println("JSON de comando inválido");
+      Serial.println("JSON de comando invalido");
       return;
     }
     if (doc["device_id"].is<const char*>()) {
@@ -454,57 +314,14 @@ void processIncomingCommand(const String &payload) {
       command = doc["comando"].as<String>();
       command.trim();
     }
-    if (!doc["dados"].isNull()) {
-      Serial.println("Dados do comando:");
-      serializeJson(doc["dados"], Serial);
-      Serial.println();
-    }
   }
 
   command.toLowerCase();
-  if (command == "calibrar" || command == "calibrar_sensor") {
-    handleCalibrateCommand();
-    return;
-  }
   if (command == "reset") {
     handleResetCommand();
     return;
   }
   Serial.printf("Comando desconhecido: %s\n", command.c_str());
-}
-
-void handleCalibrateCommand() {
-  Serial.println("Executando comando calibrar: tare da celula de carga");
-  sensorTare();
-}
-
-void handleScaleCommand(const String &payload) {
-  String command = payload;
-  command.trim();
-  int spaceIndex = command.indexOf(' ');
-  if (spaceIndex < 0) {
-    Serial.println("Uso: calibrar <peso_em_gramas>");
-    return;
-  }
-
-  float knownWeight = command.substring(spaceIndex + 1).toFloat();
-  if (knownWeight <= 0.0f) {
-    Serial.println("Peso informado invalido");
-    return;
-  }
-
-  if (!sensorIsReady()) {
-    Serial.println("HX711 nao pronto; nao foi possivel calcular o fator de calibracao");
-    return;
-  }
-
-  double value = sensorReadValue(10);
-  float factor = static_cast<float>(value / knownWeight);
-  Serial.println("=== Calibracao HX711 ===");
-  Serial.printf("Peso conhecido: %.2f\n", knownWeight);
-  Serial.printf("Leitura sem tara (media): %.2f\n", value);
-  Serial.printf("Fator sugerido para HX711_CALIBRATION_FACTOR: %.2f\n", factor);
-  Serial.println("Copie esse fator para Config::HX711_CALIBRATION_FACTOR depois de zerar a balanca com tare.");
 }
 
 void handleResetCommand() {

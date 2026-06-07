@@ -40,7 +40,7 @@ void mqttInit(Client &networkClient, const DeviceConfig &deviceCfg, IncomingHand
   mqttPtr->setCallback(internalCallback);
 
   const char *did = cfg.device_id.length() ? cfg.device_id.c_str() : "esp8266_pote_01";
-  topicPub = String("pet/") + did + "/peso";
+  topicPub = String("pet/") + did + "/alimentacao";
   topicCmd = String("pet/") + did + "/comando";
 }
 

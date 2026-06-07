@@ -94,16 +94,11 @@ void handleSample() {
     doc["token"] = cfg.token;
   } else {
     doc["device_id"] = "esp8266_teste";
-    doc["token"] = "TOKEN_DE_Teste";
+    doc["token"] = "TOKEN_DE_TESTE";
   }
-  doc["peso"] = 123.45;
-  doc["peso_media"] = 122.8;
   doc["timestamp"] = "2026-05-26T12:00:00.000Z";
-  doc["action"] = "estabilidade";
-
-  char buf[256];
-  serializeJson(doc, buf, sizeof(buf));
-  server.send(200, "application/json", buf);
+  doc["distance_cm"] = 25.0;
+  doc["action"] = "alimentacao";
 }
 
 void startProvisioningAP() {

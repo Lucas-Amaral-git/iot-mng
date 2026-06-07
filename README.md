@@ -1,92 +1,60 @@
-# Monitoramento Nutricional para Gatos
+# Monitoramento de Alimentacao para Gatos
 
-Projeto ESP8266 com PlatformIO para monitorar o peso da ração usando um módulo HX711 e uma célula de carga.
+Projeto ESP8266 com PlatformIO para detectar quando o pet se aproxima do comedouro usando um sensor HC-SR04.
 
 ## Resumo
 
 - Placa: NodeMCU v2 (ESP8266)
-- Sensor: HX711 + célula de carga (load cell)
-- Comunicação: Wi-Fi + MQTT
+- Sensor: HC-SR04 (ultrassonico)
+- Comunicacao: Wi-Fi + MQTT
 - Firmware: PlatformIO
 
-> Observação: este projeto usa um sensor de peso (célula de carga) com HX711. Não há um sensor PIR de presença implementado no código atual.
+Este firmware detecta quando o animal se aproxima do comedouro e publica um evento de "alimentacao" via MQTT. Nao ha mais uso de balanca ou celula de carga.
 
-## Conexões de hardware
+## Conexoes de hardware
 
-### Conexão HX711 -> NodeMCU
+### Conexao HC-SR04 -> NodeMCU
 
-- `HX711 DOUT` -> `NodeMCU D4` (GPIO2)
-- `HX711 SCK` -> `NodeMCU D5` (GPIO14)
-- `HX711 VCC` -> `NodeMCU 3V3`
-- `HX711 GND` -> `NodeMCU GND`
+- `HC-SR04 TRIG` -> `NodeMCU D6` (GPIO12)
+- `HC-SR04 ECHO` -> `NodeMCU D7` (GPIO13)
+- `HC-SR04 VCC` -> `NodeMCU 5V`
+- `HC-SR04 GND` -> `NodeMCU GND`
 
-### Conexão da célula de carga ao HX711
-
-As cores podem variar conforme o modelo da célula de carga. Um esquema comum é:
-
-- `célula de carga +V` (excitação) -> `HX711 E+`
-- `célula de carga -V` (excitação) -> `HX711 E-`
-- `célula de carga +S` (sinal) -> `HX711 A+` ou `HX711 B+`
-- `célula de carga -S` (sinal) -> `HX711 A-` ou `HX711 B-`
-
-> Ajuste a fiação conforme o seu módulo HX711 e a sua célula de carga. O importante no firmware é que o HX711 seja alimentado corretamente e conectado nos pinos D4/D5 do NodeMCU.
-
-## Pinos usados no firmware
-
-No arquivo `src/main.cpp` está configurado:
-
-- `Config::HX711_DOUT_PIN = 4` (NodeMCU D4)
-- `Config::HX711_SCK_PIN = 5` (NodeMCU D5)
-- `Config::HX711_CALIBRATION_FACTOR = -7050.0f`
-
-Se você trocar os pinos, atualize essas constantes.
-
-## Como compilar e enviar
-
-1. Abra o projeto em PlatformIO.
-2. Conecte o NodeMCU ao computador via USB.
-3. Execute `Upload` no PlatformIO.
-4. Abra o monitor serial a `115200` baud.
+> Ajuste os pinos se necessario, mas atualize os valores de `Config::HCSR04_TRIG_PIN` e `Config::HCSR04_ECHO_PIN` em `src/main.cpp`.
 
 ## Comandos via Serial
 
-No monitor serial, você pode usar os seguintes comandos:
+- `help` - mostra comandos disponiveis
+- `provision` - inicia o AP de provisionamento
+- `reset` - reinicia o dispositivo
 
-- `help` — mostrar comandos disponíveis
-- `tare` — zerar a balança
-- `calibrar <peso_gramas>` — calibrar com um peso conhecido
-- `scale <peso_gramas>` — ajustar escala
-- `provision` — iniciar modo de provisionamento Wi-Fi, se disponível
+## Formato MQTT
 
-## Configuração Wi-Fi e MQTT
+O payload enviado ao broker agora contem:
 
-O projeto carrega a configuração salva no dispositivo usando o módulo de provisionamento. Se não houver configuração, o firmware entrará em modo de provisionamento quando você usar o comando serial `provision`.
+- `device_id`
+- `token`
+- `timestamp`
+- `distance_cm`
+- `action` = `alimentacao`
+- `event` = `alimentou`
 
-Os valores padrão em `src/main.cpp` são:
+O topico de publicacao e `pet/<device_id>/alimentacao`.
 
-- `DEFAULT_DEVICE_ID = "esp8266_pote_01"`
-- `DEFAULT_TOKEN = "TOKEN_SECRETO"`
-- `DEFAULT_SSID = ""`
-- `DEFAULT_PASS = ""`
+## Configuracao Wi-Fi e MQTT
 
-A configuração real de Wi-Fi e MQTT é salva localmente após o provisionamento.
+A configuracao e salva localmente pelo provisionamento. Se nao houver configuracao valida, use `provision` no monitor serial para iniciar o AP e enviar os dados.
 
-## Dependências
+## Dependencias
 
-O arquivo `platformio.ini` já inclui estas bibliotecas:
+O `platformio.ini` usa:
 
 - `PubSubClient`
 - `ArduinoJson`
-- `HX711`
 - `NTPClient`
 
 ## Dicas de uso
 
-- Coloque a célula de carga em uma base estável para evitar ruído.
-- Faça o `tare` sem peso para zerar corretamente.
-- Use um peso conhecido para calibrar o fator de conversão.
-- Se o HX711 não responder, verifique a alimentação e os cabos `DOUT/SCK`.
-
-## Observações
-
-Se você precisar usar um sensor de presença (PIR) no futuro, será necessário adicionar o sensor ao hardware e ajustar o código para ler um pino digital separado. Atualmente, o firmware só usa o HX711 para monitorar peso.
+- Posicione o HC-SR04 de forma que ele detecte a aproximacao do animal ao comedouro.
+- Teste a distancia minima e ajuste `Config::HCSR04_NEAR_DISTANCE_CM` para reduzir falsos positivos.
+- Verifique se a alimentacao do HC-SR04 e estavel e/ou use uma fonte 5V adequada.
