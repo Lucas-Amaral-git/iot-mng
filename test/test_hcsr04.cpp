@@ -19,8 +19,7 @@ void loop() {
   if (distance < 0.0f) {
     Serial.println("Distancia invalida ou sem eco");
   } else {
-    Serial.printf("Distancia: %.2f cm
-", distance);
+    Serial.printf("Distancia: %.2f cm\n", distance);
   }
   delay(1000);
 }

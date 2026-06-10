@@ -17,17 +17,22 @@
 #include "mqtt.h"
 
 namespace Config {
-constexpr unsigned long SENSOR_READ_INTERVAL_MS = 2000UL;
+constexpr unsigned long SENSOR_READ_BASE_MS = 1000UL; // intervalo normal
+constexpr unsigned long SENSOR_READ_FAST_MS = 500UL;  // intervalo em modo rapido
+constexpr unsigned long SENSOR_FAST_DURATION_MS = 10000UL; // tempo em modo rapido
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000UL;
 constexpr unsigned long NTP_UPDATE_INTERVAL_MS = 60000UL;
 constexpr unsigned long MIN_EVENT_INTERVAL_MS = 30000UL;
+constexpr unsigned long PROVISION_ACTIVE_TIMEOUT_MS = 600000UL; // 10 minutos
+constexpr unsigned long PROVISION_BUTTON_DEBOUNCE_MS = 50UL;
 constexpr int TIMEZONE_OFFSET_SECONDS = -3 * 3600;
 constexpr bool TEST_MODE_EVERY_SECOND = true;
 constexpr bool SERIAL_ONLY_TEST_MODE = false;
 constexpr uint8_t HCSR04_TRIG_PIN = 12;
 constexpr uint8_t HCSR04_ECHO_PIN = 13;
-constexpr float HCSR04_NEAR_DISTANCE_CM = 10.0f;
+constexpr uint8_t HCSR04_NEAR_DISTANCE_CM = 10.0f;
 constexpr uint8_t HCSR04_SAMPLE_COUNT = 3;
+constexpr uint8_t PROVISION_BUTTON_PIN = 14; // NodeMCU D5 (GPIO14)
 }
 
 WiFiUDP ntpUdp;
@@ -39,6 +44,9 @@ bool haveDeviceConfig = false;
 bool lastNearState = false;
 unsigned long lastEventMs = 0;
 unsigned long lastSensorReadMs = 0;
+unsigned long sensorIntervalMs = Config::SENSOR_READ_BASE_MS;
+unsigned long sensorFastStartMs = 0;
+bool sensorFastMode = false;
 unsigned long lastWifiAttemptMs = 0;
 unsigned long lastNtpUpdateMs = 0;
 
@@ -51,6 +59,7 @@ void readSensorDistance();
 bool buildTimestamp(char *buffer, size_t bufferSize);
 void publishFeedingEvent(float distanceCm);
 void printWiFiStatus();
+void checkProvisionButton();
 
 const char *DEFAULT_DEVICE_ID = "esp8266_pote_01";
 const char *DEFAULT_TOKEN = "TOKEN_SECRETO";
@@ -64,6 +73,8 @@ void setup() {
   Serial.println();
   Serial.println("Iniciando monitoramento de alimentacao com ESP8266 + HC-SR04");
   Serial.println("Comandos Serial: help | provision | reset");
+
+  pinMode(Config::PROVISION_BUTTON_PIN, INPUT_PULLUP);
 
   if (Config::SERIAL_ONLY_TEST_MODE) {
     sensorInit(Config::HCSR04_TRIG_PIN, Config::HCSR04_ECHO_PIN, Config::HCSR04_NEAR_DISTANCE_CM);
@@ -90,6 +101,7 @@ void setup() {
   mqttInit(wifiClient, deviceCfg, [](const String &payload) { processIncomingCommand(payload); });
 
   lastSensorReadMs = millis();
+  sensorIntervalMs = Config::SENSOR_READ_BASE_MS;
   lastNtpUpdateMs = millis();
 
   if (Config::TEST_MODE_EVERY_SECOND) {
@@ -105,8 +117,10 @@ void loop() {
     processSerialCommand(line);
   }
 
+  checkProvisionButton();
+
   if (Config::SERIAL_ONLY_TEST_MODE) {
-    if (millis() - lastSensorReadMs >= Config::SENSOR_READ_INTERVAL_MS) {
+    if (millis() - lastSensorReadMs >= sensorIntervalMs) {
       lastSensorReadMs = millis();
       readSensorDistance();
     }
@@ -128,7 +142,7 @@ void loop() {
   mqttEnsureConnected();
   mqttLoop();
 
-  if (millis() - lastSensorReadMs >= Config::SENSOR_READ_INTERVAL_MS) {
+  if (millis() - lastSensorReadMs >= sensorIntervalMs) {
     lastSensorReadMs = millis();
     readSensorDistance();
   }
@@ -226,6 +240,25 @@ void readSensorDistance() {
   }
 
   lastNearState = near;
+
+  // Adaptive polling: se detectou aproximacao, ativa modo rapido por SENSOR_FAST_DURATION_MS
+  if (near) {
+    if (!sensorFastMode) {
+      sensorFastMode = true;
+      sensorFastStartMs = millis();
+      sensorIntervalMs = Config::SENSOR_READ_FAST_MS;
+      Serial.println("Sensor: modo rapido ativado");
+    } else {
+      // reinicia o temporizador se ainda estiver perto
+      sensorFastStartMs = millis();
+    }
+  }
+
+  if (sensorFastMode && millis() - sensorFastStartMs >= Config::SENSOR_FAST_DURATION_MS) {
+    sensorFastMode = false;
+    sensorIntervalMs = Config::SENSOR_READ_BASE_MS;
+    Serial.println("Sensor: modo rapido desativado, voltando ao intervalo base");
+  }
 }
 
 bool buildTimestamp(char *buffer, size_t bufferSize) {
@@ -236,7 +269,9 @@ bool buildTimestamp(char *buffer, size_t bufferSize) {
   int written = strftime(buffer, bufferSize, "%Y-%m-%dT%H:%M:%S", &timeInfo);
   if (written <= 0) return false;
   size_t len = strlen(buffer);
-  if (len + 5 < bufferSize) strcat(buffer, ".000Z");
+  // Append milliseconds and Brasília timezone offset (-03:00)
+  const char tz[] = ".000-03:00"; // milliseconds + offset
+  if (len + sizeof(tz) < bufferSize) strcat(buffer, tz);
   return true;
 }
 
@@ -322,6 +357,33 @@ void processIncomingCommand(const String &payload) {
     return;
   }
   Serial.printf("Comando desconhecido: %s\n", command.c_str());
+}
+
+void checkProvisionButton() {
+  int reading = digitalRead(Config::PROVISION_BUTTON_PIN);
+  static int lastReading = HIGH;
+  static int stableState = HIGH;
+  static unsigned long lastChangeMs = 0;
+
+  if (reading != lastReading) {
+    lastChangeMs = millis();
+  }
+
+  if (millis() - lastChangeMs > Config::PROVISION_BUTTON_DEBOUNCE_MS) {
+    if (reading != stableState) {
+      stableState = reading;
+      if (stableState == LOW) {
+        Serial.println("Botao de provisionamento pressionado (estavel). Iniciando AP...");
+        if (!isProvisioningActive()) {
+          startProvisioningAP(Config::PROVISION_ACTIVE_TIMEOUT_MS);
+        } else {
+          Serial.println("Provisionamento ja ativo");
+        }
+      }
+    }
+  }
+
+  lastReading = reading;
 }
 
 void handleResetCommand() {

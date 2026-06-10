@@ -20,13 +20,17 @@ Este firmware detecta quando o animal se aproxima do comedouro e publica um even
 - `HC-SR04 VCC` -> `NodeMCU 5V`
 - `HC-SR04 GND` -> `NodeMCU GND`
 
-> Ajuste os pinos se necessario, mas atualize os valores de `Config::HCSR04_TRIG_PIN` e `Config::HCSR04_ECHO_PIN` em `src/main.cpp`.
+- `Botao de provisionamento` -> `NodeMCU D5` (GPIO14) usar `INPUT_PULLUP`
+
+> Ajuste os pinos se necessario, mas atualize os valores de `Config::HCSR04_TRIG_PIN`, `Config::HCSR04_ECHO_PIN` e `Config::PROVISION_BUTTON_PIN` em `src/main.cpp`.
 
 ## Comandos via Serial
 
 - `help` - mostra comandos disponiveis
 - `provision` - inicia o AP de provisionamento
 - `reset` - reinicia o dispositivo
+
+> O provisionamento também pode ser iniciado pelo botao conectado em `NodeMCU D5`.
 
 ## Formato MQTT
 

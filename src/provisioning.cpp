@@ -16,6 +16,8 @@ using WebServerType = WebServer;
 
 static WebServerType server(80);
 static bool active = false;
+static unsigned long provisioningStartMs = 0;
+static unsigned long provisioningTimeoutMs = 0;
 
 static String buildFormHtml() {
   String html = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'/></head><body>";
@@ -88,7 +90,7 @@ void handleInfo() {
 
 void handleSample() {
   DeviceConfig cfg;
-  JsonDocument doc;
+  DynamicJsonDocument doc(256);
   if (loadDeviceConfig(cfg)) {
     doc["device_id"] = cfg.device_id;
     doc["token"] = cfg.token;
@@ -99,9 +101,14 @@ void handleSample() {
   doc["timestamp"] = "2026-05-26T12:00:00.000Z";
   doc["distance_cm"] = 25.0;
   doc["action"] = "alimentacao";
+  doc["event"] = "alimentou";
+
+  String payload;
+  serializeJson(doc, payload);
+  server.send(200, "application/json", payload);
 }
 
-void startProvisioningAP() {
+void startProvisioningAP(unsigned long timeoutMs) {
   if (active) return;
 
   Serial.println("Iniciando AP de provisionamento: ESP8266-Setup");
@@ -120,6 +127,8 @@ void startProvisioningAP() {
   server.on("/sample", HTTP_GET, handleSample);
   server.begin();
   active = true;
+  provisioningStartMs = millis();
+  provisioningTimeoutMs = timeoutMs;
 }
 
 bool isProvisioningActive() {
@@ -130,9 +139,17 @@ void stopProvisioning() {
   if (!active) return;
   server.stop();
   WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
   active = false;
+  provisioningStartMs = 0;
+  provisioningTimeoutMs = 0;
 }
 
 void provisioningLoop() {
-  if (active) server.handleClient();
+  if (!active) return;
+  server.handleClient();
+  if (provisioningTimeoutMs > 0 && millis() - provisioningStartMs >= provisioningTimeoutMs) {
+    Serial.println("Tempo de provisionamento expirou; desligando AP.");
+    stopProvisioning();
+  }
 }

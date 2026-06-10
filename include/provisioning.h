@@ -3,7 +3,7 @@
 
 #include "storage.h"
 
-void startProvisioningAP();
+void startProvisioningAP(unsigned long timeoutMs = 600000UL);
 bool isProvisioningActive();
 void stopProvisioning();
 void provisioningLoop();
